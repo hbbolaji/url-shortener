@@ -81,13 +81,13 @@ fn base62_decode(encoded: &str) -> Option<u64> {
     let mut result: u64 = 0;
     for c in encoded.chars() {
         let value = match c {
-            '0'..='9' => c as u64 - '0' as u64,
+            '0'..='9' => (c as u64 - '0' as u64) * 62,
             'A'..='Z' => c as u64 - 'A' as u64 + 10,
             'a'..='z' => c as u64 - 'a' as u64 + 36,
             _ => return None,
         };
 
-        result = result.checked_mul(62)?.checked_add(value)?;
+        result += value;
     }
     Some(result)
 }
