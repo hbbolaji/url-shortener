@@ -1,17 +1,33 @@
 use std::{env, sync::Arc};
 
-use axum::Router;
+use axum::{Json, Router, extract::State, http::StatusCode, response::IntoResponse, routing::post};
+use chrono::{DateTime, Utc};
 use redis::aio::MultiplexedConnection;
-use sqlx::{PgPool, postgres::PgPoolOptions};
+use serde::{Deserialize, Serialize};
+use sqlx::{PgPool, Row, postgres::PgPoolOptions, prelude::FromRow};
 use tokio::net::TcpListener;
 use tower_http::trace::TraceLayer;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
-const ALPHABET: &[u8; 62] = b"0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
-
 struct AppState {
     db_pool: PgPool,
     redis_conn: MultiplexedConnection,
+}
+
+#[derive(Debug, Deserialize)]
+struct ShortenPayload {
+    url: String,
+}
+
+#[derive(Debug, Serialize, FromRow)]
+struct ShortenResponse {
+    url: String,
+    short_code: String,
+}
+
+#[derive(Debug, FromRow)]
+struct UrlId {
+    id: i32,
 }
 
 #[tokio::main]
@@ -20,7 +36,6 @@ async fn main() {
     let database_url = env::var("DATABASE_URL").expect("DATABASE_URL must be set");
     let redis_url = env::var("REDIS_URL").expect("REDIS_URL must be set");
 
-    // tracing_subscriber::fmt().with_target(true).init();
     tracing_subscriber::registry()
         .with(
             tracing_subscriber::EnvFilter::try_from_default_env()
@@ -48,6 +63,7 @@ async fn main() {
     });
 
     let app = Router::new()
+        .route("/shorten", post(shorten))
         .layer(TraceLayer::new_for_http())
         .with_state(state);
 
@@ -62,32 +78,19 @@ async fn main() {
         .expect("service unavailable")
 }
 
-fn base62_encode(mut num: u64) -> String {
-    if num == 0 {
-        return "0".to_string();
-    }
+async fn shorten(
+    State(state): State<Arc<AppState>>,
+    Json(payload): Json<ShortenPayload>,
+) -> impl IntoResponse {
+    let url_res =
+        sqlx::query_as::<_, UrlId>("INSERT INTO urls (long_url) VALUES ($1) RETURNING id")
+            .bind(payload.url)
+            .fetch_one(&state.db_pool)
+            .await
+            .unwrap();
 
-    let mut result = String::new();
-    while num > 0 {
-        let remainder = (num % 62) as usize;
-        result.push(ALPHABET[remainder] as char);
-        num /= 62;
-    }
+    let short_code = base62::encode(url_res.id as u128);
+    let url = format!("0.0.0.0:3000/{}", short_code);
 
-    result
-}
-
-fn base62_decode(encoded: &str) -> Option<u64> {
-    let mut result: u64 = 0;
-    for c in encoded.chars() {
-        let value = match c {
-            '0'..='9' => (c as u64 - '0' as u64) * 62,
-            'A'..='Z' => c as u64 - 'A' as u64 + 10,
-            'a'..='z' => c as u64 - 'a' as u64 + 36,
-            _ => return None,
-        };
-
-        result += value;
-    }
-    Some(result)
+    Json(ShortenResponse { url, short_code })
 }
